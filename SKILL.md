@@ -1,6 +1,6 @@
 ---
 name: epic-game-restore
-description: Restore or migrate backed-up Epic Games Store game folders that still contain their .egstore metadata into a chosen install directory, and register them as installed in the modern Epic Games Launcher (eglv2) so they appear in the library and launch without re-downloading. This skill should be used when the user asks to restore, recover, import, move, or re-register Epic games from a backup folder, or when Epic game files exist on disk but the launcher does not show them as installed.
+description: 把仍保留 .egstore 元数据的 Epic 游戏备份文件夹恢复或迁移到指定安装目录，并在新版 Epic Games Launcher（eglv2）中注册为已安装，使其出现在游戏库中并能直接启动，无需重新下载。当用户要求恢复、还原、导入、迁移或重新注册 Epic 游戏备份，或游戏文件已在磁盘上但启动器不显示为已安装时使用本技能。关键词：Epic 游戏恢复、epic game restore、.egstore、installations.jsonl、eglv2 launcher。
 agent_created: true
 ---
 
