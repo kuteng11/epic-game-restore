@@ -14,13 +14,14 @@ agent_created: true
 ## 适用与不适用
 
 - 适用：新版 eglv2 启动器；备份保留了每个游戏的 `.egstore`（`.manifest` + `.mancpn`）；游戏文件在同一块磁盘上迁移/恢复。
-- 不适用：备份缺 `.egstore`（此时只能走官方重装流程，会重新下载）；旧版启动器（用 `ProgramData\Epic\...\Manifests\*.item`，改用第 5 节的官方流程）。
+- 不适用：备份缺 `.egstore`（此时只能走官方重装流程，会重新下载）；旧版启动器（用 `ProgramData\Epic\...\Manifests\*.item`，改用第 6 节的官方流程）。
 
 ## 工作流
 
 ### 1. 只读侦察，生成恢复计划
 
-先确认启动器版本、备份结构、目标目录现状、磁盘剩余空间、启动器进程与下载队列是否空闲。
+先确认：启动器版本、备份结构、目标目录现状、磁盘剩余空间、启动器进程、**下载队列是否空闲**、journal 中有效安装数，
+以及备份里是否有游戏在库中已存在有效安装（按 `artifactId` 比对，见下）。
 随后运行扫描脚本（只读，不改任何文件）：
 
 ```bash
@@ -38,6 +39,11 @@ python <skill>/scripts/inspect_backups.py \
 **必须人工复核扫描结果**：确认每个 `libraryTitle` 对得上、`launchExecutable` 存在、目标目录无同名文件夹、`[WARN]` 项都已解释清楚。
 遇到 `--all-candidates` 显示多个候选时，以 `references/eglv2-format.md` 第 3 节的规则判断主游戏。
 
+复核时另外手动查一次 journal：把 `installations.jsonl` 按 `installationId` 取最后一条，排除
+`complete:false` 与无 `dir` 的墓碑记录，得到真正有效的已装列表。**按 `artifactId` 判重**，不要只按
+`installationId`——同一个游戏换个版本/重装过会有不同 id，但 artifact 相同。若已存在有效安装，
+默认应跳过该游戏或先问用户是否要替换；若旧记录只有 `complete:false` + 墓碑，则说明已被卸载，可以恢复。
+
 ### 2. 向用户确认两个决策后再动手
 
 用提问确认，不要替用户默认：
@@ -47,34 +53,55 @@ python <skill>/scripts/inspect_backups.py \
 
 同时告知总体积、目标盘剩余空间、原备份会被如何处理。
 
+若侦察发现**启动器正在下载/排队更新**，必须额外说明并让用户选择：现在中断并继续（队列会持久化，重启后自动继续）、
+等队列空闲后再执行、或改走官方安装流程（不关闭启动器、不中断下载）。不要擅自杀掉用户的下载。
+
 ### 3. 关闭启动器
 
-选择"写记录"方案时，先优雅关闭 `EpicGamesLauncher.exe`（`CloseMainWindow()`，数秒后若仍在则 `Stop-Process -Force`），并确认进程已退出、下载队列空闲。
+选择"写记录"方案时，先优雅关闭 `EpicGamesLauncher.exe`（`CloseMainWindow()`，数秒后若仍在则 `Stop-Process -Force`），并确认进程已退出。
 **启动器运行时绝不修改 `installations.jsonl`。**
+
+关闭前记一下 `download\queue.json` 里的操作数；Epic 的下载队列是持久化的，重启后任务仍在，只是当前分块可能要重新校验。
+注意启动器退出时可能自己追加墓碑/`complete:false` 记录，所以 dry-run 要在进程完全退出后再跑。
 
 ### 4. 先 dry-run，再执行
 
 ```bash
 python <skill>/scripts/apply_restore.py --plan "C:\Users\abel\epic-restore-plan.json"          # 预演
 python <skill>/scripts/apply_restore.py --plan "C:\Users\abel\epic-restore-plan.json" \
-  --execute --mode move --launch-after
+  --execute --mode move
 ```
 
 脚本自动完成：前置校验（源/目标/元数据/空间/重复记录）→ 备份 journal 为
 `installations.jsonl.bak-<时间戳>` → 按 mode 放置文件夹并逐个校验 `.egstore` →
-按第 2 节字段规则追加 `complete:true` 记录 → 可选启动启动器。
+按第 2 节字段规则追加 `complete:true` 记录。
 任何一步失败立即中止，并提示用备份恢复。
 
+**不要用 `--launch-after`**：实测在 Windows 上脚本报告"已启动"但进程随即退出、不生成新日志。
+启动器统一在下一步用 `Start-Process` 单独拉起并确认 PID 与日志文件。
+
 ### 5. 重启并验证
+
+```powershell
+$exe = "$env:LOCALAPPDATA\Epic Games\Launcher\EpicGamesLauncher.exe"
+Start-Process -FilePath $exe -WorkingDirectory (Split-Path $exe) -PassThru
+# 等 10 秒后确认 Get-Process EpicGamesLauncher 存在、logs 目录出现新文件
+```
 
 ```bash
 python <skill>/scripts/verify_restore.py --plan "C:\Users\abel\epic-restore-plan.json"
 ```
 
 检查 journal 中完成记录数、每个 `dir` / 启动程序是否真实存在，并抓取最新启动器日志中的
-`Replayed the installations log ... live=N removed=0`、`ExecutableCheckCompleted ... suspect=0`、
+`Replayed the installations log ... live=N`、`ExecutableCheckCompleted ... suspect=0`、
 `Dropped 0 unplayable installation record(s)` 与每款游戏的 `new_state=CanLaunch`。
 把结果汇总给用户。
+
+等待日志回放时**只认启动时间点之后的新日志文件**（记录启动前的文件名集合或用 mtime 截止），
+否则容易命中上一次的旧日志（例如 `live=11`）而误判。
+`removed=N` 不是失败：通常是启动器清理旧的墓碑记录；`complete:false` 且带 `pendingVersion` 的记录是
+正在更新的游戏，会在 `ProductState` 里显示 `Queued` / `Updating`，同样不算恢复失败。
+只要 `suspect=0`、`Dropped 0`、目标游戏都有 `CanLaunch`、无 ERROR 级别日志，即为成功。
 
 ### 6. 官方安装流程（备选）
 
@@ -89,8 +116,8 @@ python <skill>/scripts/verify_restore.py --plan "C:\Users\abel\epic-restore-plan
 - 不要手动改 journal 第一行 header 的 `entries`；启动器启动时自行 compact。
 - 追加记录用 `newline="\n"`，写前检查文件末尾是否有换行。
 - 改 journal 前后必须确认启动器完全退出；改完必须重启才生效。
-- 只追加、不重写已有记录；已注册的游戏直接跳过。
-- 提醒用户：备份 manifest 版本通常偏旧，启动器可能提示更新，更新会验证并复用本地文件，不会全量重下；个别游戏异常时用「管理 → 验证/修复」。
+- 只追加、不重写已有记录；**同一 `artifactId` 已有有效安装时先问用户，不要直接追加第二份**（可能产生两条指向不同目录的同游戏记录）。
+- 提醒用户：备份 manifest 版本通常偏旧，启动器可能提示更新，更新会验证并复用本地文件，不会全量重下；个别游戏异常时用「管理 → 验证/修复」。在线游戏（Fortnite、Fall Guys 等）通常必须更新到当前版本才能进入。
 
 ## 回滚
 
